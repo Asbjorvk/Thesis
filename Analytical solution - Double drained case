@@ -1,0 +1,58 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Introducing variables
+h = 1 # m 
+tmin, tmax = 0, 1 # yr
+cv = 0.5 # m^2/s 
+
+# Spatial discretization 
+nz = 100
+z = np.linspace(0, h , nz)
+
+# Time discrtetization
+nt = 100
+t = np.linspace(tmin, tmax, nt)
+
+# pore pressure
+p = np.zeros( (nz, nt) )
+
+# Boundary conditions
+p[0, 1:] = 0 
+p[-1, 1:] = 0
+
+# Initial conditions
+p[:, 0:1] = 1
+
+for i in range(1, nt):
+    total = 0
+    for k in range(1,1000):
+        first = ( (-1) ** (k - 1) ) / (2 * k - 1)
+        second = np.cos( (2 * k - 1) * ( (np.pi * z[0:-1]) / (2 * h) ) )
+        third = np.exp( -(2 * k - 1) **  2 * ( (np.pi **  2 * cv * t[i]) / (4 * h ** 2) ) ) 
+        total += (4/np.pi) * (first * second * third)
+    p[0:-1, i] = total
+
+    
+fig, ax = plt.subplots()
+ax.set_title('Results - Analytical')
+ax.set_ylabel('z [m]')
+ax.set_xlabel('t [dimless]')
+im = ax.imshow(
+    p[:,1:],
+    interpolation = 'nearest',
+    cmap = 'viridis',
+    extent = [tmin, tmax, 0, h],
+    origin = 'lower',
+    aspect = 'auto',
+    )
+
+plt.colorbar(im)
+plt.show()
+
+print(p)
+
+
+np.savez('Data_anasol_DrainedTop_UndrainedBottom.npz', z = z, t = t, p = p)
+
+# data = np.load('Data_anasol_DrainedTop_UndrainedBottom.npz')
