@@ -1,0 +1,185 @@
+# Importing packages
+import deepxde as dde
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.interpolate import griddata
+
+# Variables 
+h = 1.0 # m
+tmin, tmax = 0, 1 # s
+cv = 0.2 # m^2/s. 
+
+# Defining the PDE for the consolidation equation t > 0
+def PDE(x,y):
+    dp_t = dde.grad.jacobian(y,x, j = 1)
+    dp_xx = dde.grad.hessian(y,x, j = 0)
+    return (dp_t - cv * dp_xx)
+
+# Defining the function for the analytical solution 
+# This soltion is for the dranied top and bottom
+def anasol(x):
+    total = 0  
+    for k in range(1000):
+        first = (( (-1) ** (k-1))/(2*k - 1))
+        second = np.cos( (2*k - 1) * ( (np.pi * x[:,0:1])/ (1 * h) ) )
+        third = np.exp( -(2*k - 1) ** 2 *( (np.pi ** 2 * cv * x[:,1:]) 
+                                          / (1 * h ** 2) ) )
+        total += (4 / np.pi) * (first * second * third)
+    return total
+
+# Defining the function for the initial conditions
+def IC(x): # Normalized initial conditions
+    return 1
+
+# Defining BC 
+def BC(x): # Dirichlet boundary conditions
+    return 0
+
+
+# Defining geometry for space and time
+geom = dde.geometry.Interval(-h/2,h/2)
+timedomain = dde.geometry.TimeDomain(tmin, tmax)
+geomtime = dde.geometry.GeometryXTime(geom, timedomain)
+
+# Defining boundary and initial conditions
+bc = dde.icbc.boundary_conditions.DirichletBC(geomtime, BC, lambda _, on_boundary: on_boundary)
+ic = dde.icbc.IC(geomtime, IC, lambda _, on_initial: on_initial)
+
+# Defining the problem as a TimePDE
+data  = dde.data.TimePDE(geomtime, PDE, [bc, ic], num_domain = 400,
+                         num_boundary = 200, num_initial = 300, 
+                         solution = anasol, num_test = 10000, )
+
+
+# Chosing the network
+layer_size = ([2] + [32] * 3 + [1] ) 
+activation = 'tanh'
+initializer = 'Glorot uniform'
+net = dde.nn.FNN(layer_size, activation, initializer)
+
+# Creating the model
+model = dde.Model(data, net)
+
+# Compiling and training the model 
+model.compile('adam', lr = 0.001, 
+              metrics = ['l2 relative error'])
+losshistory, train_state = model.train(iterations = 20000)
+
+# Saving the plot
+dde.saveplot(losshistory, train_state, issave = True, isplot=True, loss_fname="loss_DrainedTop_DrainedBottom.dat",
+             train_fname="train_DrainedTop_DrainedBottom.dat", test_fname ="test_DrainedTop_DrainedBottom.dat")
+
+# Generating syntetic data for model prediction
+# In this case, there will be added noise to the dataset used for prediction
+
+# Space and time 
+z_syn = np.linspace(-h/2, h/2, 100)
+t_syn = np.linspace(tmin, tmax, 100)
+
+# Structurizing data
+Z_syn, T_syn = np.meshgrid(z_syn,t_syn)
+Z_star = np.hstack( (Z_syn.flatten()[:,None], T_syn.flatten()[:,None]) )
+
+# Adding noise to the dataset
+sigma = [0.025, 0.05, 0.075, 0.1] # Four values of standard deviation ranging from 0 <= sigma <= 10 %.
+
+# Creating four different dataset with increasing levels of noise
+counter = 1
+for i in sigma:
+    n = np.random.normal(0, i, Z_star.shape)
+    if counter == 1:
+        Z_star1 = Z_star + n
+    elif counter == 2:
+        Z_star2 = Z_star + n
+    elif counter == 3:
+        Z_star3 = Z_star + n
+    elif counter == 4:
+        Z_star4 = Z_star + n
+    counter += 1
+
+# Predicting the new model
+pred_1 = model.predict(Z_star1, operator = None)
+pred_2 = model.predict(Z_star2, operator = None)
+pred_3 = model.predict(Z_star3, operator = None)
+pred_4 = model.predict(Z_star4, operator = None)
+
+
+# Stucturizing data for plotting
+p_hat1 = griddata(Z_star1, pred_1[:,0], (Z_syn, T_syn), method = 'cubic')
+p_hat2 = griddata(Z_star2, pred_2[:,0], (Z_syn, T_syn), method = 'cubic')
+p_hat3 = griddata(Z_star3, pred_3[:,0], (Z_syn, T_syn), method = 'cubic')
+p_hat4 = griddata(Z_star4, pred_4[:,0], (Z_syn, T_syn), method = 'cubic')
+
+
+
+# Loading in data from the analytical solution
+data = np.load('Data_anasol_DrainedTop_DrainedBottom.npz')
+p_anasol  = data['p']
+
+# Loads of plotting
+fig, (ax1, ax2, ax3, ax4, ax5) = plt.subplots(nrows = 5, ncols = 1, sharex = True, sharey = False, figsize = (6, 11))
+
+ax1.set_title('Analytical')
+ax1.set_ylabel('z [m]')
+im1 = ax1.imshow(
+    p_anasol[:,:],
+    interpolation = 'nearest',
+    cmap = 'viridis',
+    extent = [tmin, tmax, -h/2, h/2],
+    origin = 'lower',
+    aspect = 'auto',
+    )
+fig.colorbar(im1, ax = ax1)
+fig.suptitle('Results: Drained top and bottom')
+
+ax2.set_title('Sigma = 0.025')
+ax2.set_ylabel('z [m]')
+im2 = ax2.imshow(
+    p_hat1.T[:,:],
+    interpolation = 'nearest',
+    cmap = 'viridis',
+    extent = [tmin, tmax, -h/2, h/2],
+    origin = 'lower',
+    aspect = 'auto',
+    )
+fig.colorbar(im2, ax = ax2)
+
+ax3.set_title('Sigma = 0.05')
+ax3.set_ylabel('z [m]')
+im3 = ax3.imshow(
+    p_hat2.T[:,:],
+    interpolation = 'nearest',
+    cmap = 'viridis',
+    extent = [tmin, tmax, -h/2, h/2],
+    origin = 'lower',
+    aspect = 'auto',
+    )
+fig.colorbar(im3, ax = ax3)
+
+ax4.set_title('Sigma = 0.075')
+ax4.set_ylabel('z [m]')
+im4 = ax4.imshow(
+    p_hat3.T[:,:],
+    interpolation = 'nearest',
+    cmap = 'viridis',
+    extent = [tmin, tmax, -h/2, h/2],
+    origin = 'lower',
+    aspect = 'auto',
+    )
+fig.colorbar(im4, ax = ax4)
+
+ax5.set_title('Sigma = 0.1')
+ax5.set_ylabel('z [m]')
+ax5.set_xlabel('t [yr]')
+im5 = ax5.imshow(
+    p_hat4.T[:,:],
+    interpolation = 'nearest',
+    cmap = 'viridis',
+    extent = [tmin, tmax, -h/2, h/2],
+    origin = 'lower',
+    aspect = 'auto',
+    )
+fig.colorbar(im5, ax = ax5)
+
+plt.tight_layout()
+plt.show()
