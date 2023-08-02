@@ -1,0 +1,120 @@
+# Importing packages
+import deepxde as dde
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.interpolate import griddata
+
+# Variables 
+h = 1.0 # m
+tmin, tmax = 0, 1 # s
+cv = 0.2 # m^2/s
+
+# Defining the PDE for the consolidation equation t > 0
+def PDE(x,y):
+    dp_t = dde.grad.jacobian(y,x, j = 1)
+    dp_xx = dde.grad.hessian(y,x, j = 0)
+    return (dp_t - cv * dp_xx)
+
+# Defining the function for the analytical solution 
+# This soltion is for the dranied top and bottom
+def anasol(x):
+    total = 0  
+    for k in range(1000):
+        first = (( (-1) ** (k-1))/(2*k - 1))
+        second = np.cos( (2*k - 1) * ( (np.pi * x[:,0:1])/ (1 * h) ) )
+        third = np.exp( -(2*k - 1) ** 2 *( (np.pi ** 2 * cv * x[:,1:]) 
+                                          / (1 * h ** 2) ) )
+        total += (4 / np.pi) * (first * second * third)
+    return total
+
+# Defining the function for the initial conditions
+def IC(x): # Normalized initial conditions
+    return 1
+
+# Defining BC 
+def BC(x): # Dirichlet boundary conditions
+    return 0
+
+
+# Defining geometry for space and time
+geom = dde.geometry.Interval(-h/2,h/2)
+timedomain = dde.geometry.TimeDomain(tmin, tmax)
+geomtime = dde.geometry.GeometryXTime(geom, timedomain)
+
+# Defining boundary and initial conditions
+bc = dde.icbc.boundary_conditions.DirichletBC(geomtime, BC, lambda _, on_boundary: on_boundary)
+ic = dde.icbc.IC(geomtime, IC, lambda _, on_initial: on_initial)
+
+# Defining the problem as a TimePDE
+data  = dde.data.TimePDE(geomtime, PDE, [bc, ic], num_domain = 400,
+                         num_boundary = 200, num_initial = 300, 
+                         solution = anasol, num_test = 10000, )
+
+
+# Chosing the network
+layer_size = ([2] + [32] * 5 + [1] )
+activation = 'sigmoid'
+initializer = 'Glorot uniform'
+net = dde.nn.FNN(layer_size, activation, initializer)
+
+# Creating the model
+model = dde.Model(data, net)
+
+# Compiling and training the model 
+model.compile('adam', lr = 0.001, 
+              metrics = ['l2 relative error'])
+losshistory, train_state = model.train(iterations = 20000)
+
+# Saving the plot
+dde.saveplot(losshistory, train_state, issave = True, isplot=True, loss_fname="loss_DrainedTop_DrainedBottom.dat",
+             train_fname="train_DrainedTop_DrainedBottom.dat", test_fname ="test_DrainedTop_DrainedBottom.dat")
+
+# Generating syntetic data for model prediction
+# Space and time
+z_syn = np.linspace(-h/2, h/2, 100)
+t_syn = np.linspace(tmin, tmax, 100)
+Z_syn, T_syn = np.meshgrid(z_syn,t_syn)
+
+Z_star = np.hstack( (Z_syn.flatten()[:,None], T_syn.flatten()[:,None]) )
+prediction = model.predict(Z_star, operator = None)
+
+
+p_hat = griddata(Z_star, prediction[:,0], (Z_syn, T_syn), method = 'cubic')
+
+fig, (ax1, ax2) = plt.subplots(nrows = 2, ncols = 1, sharex = False, sharey = True, figsize = (6,6))
+ax1.set_title('Prediction')
+ax1.set_ylabel('z [m]')
+ax1.set_xlabel('t [yr]')
+im1 = ax1.imshow(
+    p_hat.T[:,1:],
+    interpolation = 'nearest',
+    cmap = 'viridis',
+    extent = [tmin, tmax, -h/2, h/2],
+    origin = 'lower',
+    aspect = 'auto',
+    )
+fig.colorbar(im1, ax = ax1)
+
+# Loading in data from the analytical solution
+data = np.load('Data_anasol_DrainedTop_DrainedBottom.npz')
+p_anasol  = data['p']
+
+ax2.set_title('Analytical')
+ax2.set_ylabel('z [m]')
+ax2.set_xlabel('t [yr]')
+im2 = ax2.imshow(
+    p_anasol[:,:],
+    interpolation = 'nearest',
+    cmap = 'viridis',
+    extent = [tmin, tmax, -h/2, h/2],
+    origin = 'lower',
+    aspect = 'auto',
+    )
+fig.colorbar(im2, ax = ax2)
+if activation == 'sigmoid':
+    fig.suptitle('Results: Drained top and bottom with sigmoid')
+elif activation == 'tanh':
+    fig.suptitle('Results: Drained top and bottom with tanh')
+plt.tight_layout()
+plt.show()
+
