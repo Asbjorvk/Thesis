@@ -1,0 +1,216 @@
+# Importing packages
+import numpy as np
+import deepxde as dde
+import matplotlib.pyplot as plt
+from deepxde.backend import tf
+
+# Constant variables
+gamma = 20 # kN/m^3
+q = 100 # kN/m^2
+p = 10 # kN/m^2
+su=dde.Variable(20.0)# kPa
+pi=3.1415926
+
+
+# Variables for the geometry
+B = 10 # m
+
+# Stress normalization
+snorm=q+gamma*B
+
+# Defining system of PDE
+def PDE(x,y):
+    # Extract values of sigma_x, sigma_y, and tau_xy
+    sig_x, sig_y, tau_xy = y[:, 0:1] , y[:, 1:2] , y[:, 2:3]
+    
+    # Extract the values of spatial coordinates
+    r, t = x[:,0:1] , x[:,1:2]
+    
+    # Convert to theta
+    t=t*pi
+    
+    # Tresca constraint - Undrained
+    constr=1/4*(sig_x-sig_y)**2+tau_xy**2-(su/snorm)**2 
+    
+    # Calculate gradients
+    dSigma_x_dr = dde.grad.jacobian(y, x, i = 0, j = 0)
+    dSigma_x_dt = dde.grad.jacobian(y, x, i = 0, j = 1)
+    
+    dSigma_y_dr = dde.grad.jacobian(y, x, i = 1, j = 0)
+    dSigma_y_dt = dde.grad.jacobian(y, x, i = 1, j = 1)
+    
+    dTau_xy_dr = dde.grad.jacobian(y, x, i = 2, j = 0)
+    dTau_xy_dt = dde.grad.jacobian(y, x, i = 2, j = 1)
+    
+    # Evaluate PDEs
+    diff_1 = r*pi*tf.cos(t)*dSigma_x_dr - tf.sin(t)*dSigma_x_dt + \
+        r*pi*dTau_xy_dr*tf.sin(t)+tf.cos(t)*dTau_xy_dt
+        
+    diff_2 = r*pi*tf.cos(t)*dTau_xy_dr - tf.sin(t)*dTau_xy_dt + \
+        r*pi*tf.sin(t)*dSigma_y_dr + tf.cos(t)*dSigma_y_dt - r*pi*gamma*B/snorm
+    
+    return [diff_1, diff_2, constr] 
+
+# Defining geometry
+# Miniminum radius to avoid numerical issues
+r0=0.001
+# Define geometry
+geom = dde.geometry.Rectangle([r0, 0], [1, 1])
+
+# Defining boundary conditions
+# Left boundary = Dirichlet BC
+def lower_boundary (x, on_boundary):
+    return on_boundary and np.isclose(x[1], 0)
+
+BC_lower_0 = dde.icbc.DirichletBC(geom, lambda X: (q-2*su)/snorm, lower_boundary, component=0)
+BC_lower_1 = dde.icbc.DirichletBC(geom, lambda X: q/snorm, lower_boundary, component=1)
+BC_lower_2 = dde.icbc.DirichletBC(geom, lambda X: 0, lower_boundary, component=2)
+
+
+# Right boundary = Dirichlet BC
+def up_boundary(x, on_boundary):
+    return on_boundary and np.isclose(x[1], 1)
+
+BC_up_0 = dde.icbc.DirichletBC(geom, lambda X: (p+2*su)/snorm, up_boundary,component=0) 
+BC_up_1 = dde.icbc.DirichletBC(geom, lambda X: p/snorm, up_boundary,component=1)
+BC_up_2 = dde.icbc.DirichletBC(geom, lambda X: 0, up_boundary,component=2)
+
+
+# Gathering BCs
+BC = [BC_lower_0, BC_lower_1, BC_lower_2, BC_up_0, BC_up_1, BC_up_2]
+
+# Creating, defining and implementing neural network
+data = dde.data.PDE(
+    geom,
+    PDE,
+    BC,
+    num_domain = 500,
+    num_boundary = 200,
+    num_test = 500,
+    )
+
+# Spesifics of the neural network
+activation = 'tanh'
+layer_size = [2] + [50] * 3 + [3]
+initializer = 'Glorot uniform'
+
+# Neural network
+net = dde.nn.FNN(layer_size, activation, initializer)
+
+
+# Specify the model
+# Start with Adam optimizer
+optimizer = 'adam'
+learning_rate = 0.001
+model = dde.Model(data, net)
+model.compile(optimizer, learning_rate,external_trainable_variables=[su])
+variable = dde.callbacks.VariableValue(su, period=1000)
+model.train(iterations=20000, callbacks=[variable])
+
+
+# Switch to L-BFGS optimizer
+dde.optimizers.config.set_LBFGS_options(ftol=0, gtol=1e-10)
+model.compile("L-BFGS",external_trainable_variables=[su])
+
+# Training and saving/plotting the model
+losshistory, train_state = model.train(callbacks=[variable])
+dde.saveplot(losshistory, train_state, issave = False, isplot = True)
+
+# Plot values
+# Sample points from the domain
+x = geom.uniform_points(10000, boundary=True)
+
+# Predict values of sigma_x, sigma_y and tau_xy
+y_pred = model.predict(x)
+
+# Plot sigma_x
+plt.scatter(x[:,0],x[:,1],c=y_pred[:,0]); plt.colorbar()
+plt.xlabel('$ r/B $')
+plt.ylabel('$ \\theta/\pi $')
+plt.title('$ \sigma_{x, norm} $ [-]')
+# plt.savefig(r'C:\Users\Akval\OneDrive\Skrivebord\Masteroppgave\Method of characteristics\Programmering\Latest code\Forward\Lagrede bilder/sigmax-polar.png', dpi=600)
+plt.show()
+
+# Plot sigma_y
+plt.scatter(x[:,0],x[:,1],c=y_pred[:,1]); plt.colorbar()
+plt.xlabel('$ r/B $')
+plt.ylabel('$ \\theta/\pi $')
+plt.title('$ \sigma_{y, norm} $ [-]')
+# plt.savefig(r'C:\Users\Akval\OneDrive\Skrivebord\Masteroppgave\Method of characteristics\Programmering\Latest code\Forward\Lagrede bilder/sigmay-polar.png', dpi=600)
+plt.show()
+
+# # Plot tau_xy
+plt.scatter(x[:,0],x[:,1],c=y_pred[:,2]); plt.colorbar()
+plt.xlabel('$ r/B $')
+plt.ylabel('$ \\theta/\pi $')
+plt.title('$ \\tau_{xy, norm} $ [-]')
+# plt.savefig(r'C:\Users\Akval\OneDrive\Skrivebord\Masteroppgave\Method of characteristics\Programmering\Latest code\Forward\Lagrede bilder/tauxy-polar.png', dpi=600)
+plt.show()
+
+# Calculate the value of su from data
+su_pred=np.sqrt(1/4*(y_pred[:,0]-y_pred[:,1])**2+y_pred[:,2]**2)*snorm
+plt.scatter(x[:,0],x[:,1],c=su_pred); plt.colorbar()
+plt.xlabel('$ r/B $')
+plt.ylabel('$ \\theta/\pi $')
+plt.title('$ s_{u} $ [kPa]')
+# plt.savefig(r'C:\Users\Akval\OneDrive\Skrivebord\Masteroppgave\Method of characteristics\Programmering\Latest code\Forward\Lagrede bilder/su-polar.png', dpi=600)
+plt.show()
+
+
+
+# Convert to non-normalized cartesian coordinates
+x1=x[:,0]*B*np.cos(x[:,1]*pi)
+y1=x[:,0]*B*np.sin(x[:,1]*pi)
+
+# Convert to non-normalized stresses
+y_pred1=y_pred*snorm
+
+# Plot sigma_x
+plt.scatter(x1,y1,c=y_pred1[:,0])
+ax=plt.gca()
+ax.invert_yaxis()
+plt.colorbar()
+plt.xlabel('$ x $')
+plt.ylabel('$ y $')
+plt.title('$ \sigma_x $ [kPa]')
+# plt.savefig(r'C:\Users\Akval\OneDrive\Skrivebord\Masteroppgave\Method of characteristics\Programmering\Latest code\Forward\Lagrede bilder/sigmax-cartesian.png', dpi=600)
+plt.show()
+
+# Plot sigma_y
+plt.scatter(x1,y1,c=y_pred1[:,1])
+ax=plt.gca()
+ax.invert_yaxis()
+plt.colorbar()
+plt.xlabel('$ x $')
+plt.ylabel('$ y $')
+plt.title('$ \sigma_y $ [kPa]')
+# plt.savefig(r'C:\Users\Akval\OneDrive\Skrivebord\Masteroppgave\Method of characteristics\Programmering\Latest code\Forward\Lagrede bilder/sigmay-cartesian.png', dpi=600)
+plt.show()
+
+# # Plot tau_xy
+plt.scatter(x1,y1,c=y_pred1[:,2])
+ax=plt.gca()
+ax.invert_yaxis()
+plt.colorbar()
+plt.xlabel('$ x $')
+plt.ylabel('$ y $')
+plt.title('$ \\tau_{xy} $ [kPa]')
+# plt.savefig(r'C:\Users\Akval\OneDrive\Skrivebord\Masteroppgave\Method of characteristics\Programmering\Latest code\Forward\Lagrede bilder/tauxy-cartesian.png', dpi=600)
+plt.show()
+
+
+# Calculate the value of su from data
+plt.scatter(x1,y1,c=su_pred)
+ax=plt.gca()
+ax.invert_yaxis()
+plt.colorbar()
+plt.xlabel('$ x $')
+plt.ylabel('$ y $')
+plt.title('$ s_u $ [kPa]')
+# plt.savefig(r'C:\Users\Akval\OneDrive\Skrivebord\Masteroppgave\Method of characteristics\Programmering\Latest code\Forward\Lagrede bilder/su-cartesian.png', dpi=600)
+plt.show()
+
+print("Mean su value=%.3f kPa" % (np.mean(su_pred)))
+print("Max sig_x value=%.3f kPa" % (np.max(y_pred1[:,0])))
+print("Max sig_y value=%.3f kPa" % (np.max(y_pred1[:,1])))
+print("Min tau_xy value=%.3f kPa" % (np.min(y_pred1[:,2])))
