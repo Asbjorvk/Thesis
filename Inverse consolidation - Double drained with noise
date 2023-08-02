@@ -1,0 +1,133 @@
+# Importing packages
+import deepxde as dde
+import numpy as np
+import matplotlib.pyplot as plt
+# from scipy.interpolate import griddata
+
+# Variables 
+h = 1 # m
+tmin, tmax = 0, 1 # s or year
+# cv2 = 0.6 # m^2/(s or year)
+
+# Specifying the inital search value for external trainable variable
+cv = dde.Variable(1.0)
+
+# Defining the PDE for the consolidation equation t > 0
+def PDE(x,y):
+    dp_t = dde.grad.jacobian(y, x, i = 0, j = 1)
+    dp_xx = dde.grad.hessian(y, x, i = 0, j = 0)
+    return (dp_t - cv * dp_xx)
+
+
+def Get_TrainData(N):
+    # This is an attempt at using random points in the dataset for training of the inverse model
+    
+    # Importing data
+    data = np.load('Data_anasol_DrainedTop_UndrainedBottom.npz')
+    z, t, p = data['z'].flatten()[:, None], data['t'].flatten()[:,None], data['p']
+    p = np.rot90( np.rot90( np.rot90(p) ) )
+    
+    # Create meshgrid
+    Z, T = np.meshgrid(z, t)
+    zt_grid = np.hstack( (Z.flatten()[:,None], T.flatten()[:, None]) )
+    p_grid = p.flatten()[:, None]
+    
+    # Sample data
+    idx = np.random.choice(zt_grid.shape[0], N, replace = False)
+    zt_sample = zt_grid[idx, :]
+    p_sample = p_grid[idx, :]
+    
+    # creating traningsets
+    z_train = zt_sample[:, 0:1]
+    t_train = zt_sample[:, 1:2]
+    p_train = p_sample
+
+    return np.hstack( (z_train, t_train) ), p_train
+
+# Defining the function for the initial conditions
+def IC(x):
+    return 1
+
+# Defining boundary conditions 
+# Left boundary is the dirchlet boundary conditions for the values of x = 0
+def boundary_l(x, on_boundary):
+    return on_boundary and np.isclose(x[0], 0)
+# Right boundary is the Von Neumann boundary conditions for the dt/dx = 0
+def boundary_r(x, on_boundary):
+    return on_boundary and np.isclose(x[0], 1)
+
+# Defining geometry for space and time
+geom = dde.geometry.Interval(0, h)
+timedomain = dde.geometry.TimeDomain(tmin, tmax)
+geomtime = dde.geometry.GeometryXTime(geom, timedomain)
+
+# Defining boundary and initial conditions
+bc_r = dde.icbc.NeumannBC(geomtime, lambda x: 0, boundary_r)
+bc_l = dde.icbc.DirichletBC(geomtime, lambda x: 0, boundary_l)
+ic = dde.icbc.IC(geomtime, IC, lambda _, on_initial: on_initial)
+
+# Creating data for evaluating external variable cv
+observe_x, P = Get_TrainData(2000)
+
+# Assing noise to the dataset
+sigma = 0.1 # Standard deviation
+mu = 0 # Mean variance
+noise = np.random.normal(mu, sigma, P.shape)
+P = P + noise
+observe_y = dde.icbc.PointSetBC(observe_x, P)
+
+# Variables for the model
+data = dde.data.TimePDE(
+    geomtime, 
+    PDE, 
+    [bc_r, bc_l, ic, observe_y],
+    num_domain = 400, 
+    num_boundary = 200, 
+    num_initial = 300, 
+    anchors = observe_x, 
+    train_distribution = 'LHS'
+    )
+
+# Variables for the neural net
+activation = 'tanh'
+initializer = 'Glorot uniform'
+hidden_layers = ( [2] + [32] * 3 + [1] )
+net = dde.nn.FNN(hidden_layers, activation, initializer)
+
+# Compiling the model
+model = dde.Model(data, net)
+model.compile('adam', lr = 0.001, external_trainable_variables = [cv], 
+              )
+# Trainable variable 
+filename = 'Variable - Inverse analysis for drained top, undrained bottom with noise.dat'
+variable = dde.callbacks.VariableValue(cv, period = 1000, filename = filename)
+
+# Traning and saving the model
+losshistory, train_state = model.train(iterations = 20000, callbacks = [variable])
+dde.saveplot(losshistory, train_state, issave = True, isplot = True)
+
+# Plotting the values for the drained top, undrained bottom case
+# Importing and structurizing the data
+predicted_data2 = np.loadtxt(filename, delimiter = ' ', dtype = str)
+
+# Structurizing data
+epochs2 = []
+pred_cv2 = []
+for i in predicted_data2:
+    epochs2.append(float(i[0]))
+    pred_cv2.append(float(i[1][1:-1]))
+
+# Plotting of the data
+fig, ax = plt.subplots()
+ax.hlines(y = 0.5, xmin = 0, xmax = max(epochs2), color = 'orangered', linestyles = '-', label = 'Actual value of Cv = 0.5')
+ax.plot(epochs2, pred_cv2, linestyle = '--', label = 'Approximation done by PINN')
+ax.set_xlabel('Iterations')
+ax.set_ylabel('Cv [m^2/yr]')
+ax.set_title('Inverse analysis for drained top and undrained bottom \n Sigma = 0.1')
+ax.grid()
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+pre = pred_cv1[-1]
+print('{0:.6f}'.format(pre))
