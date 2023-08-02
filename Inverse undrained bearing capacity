@@ -1,0 +1,304 @@
+# Importing packages
+import numpy as np
+import deepxde as dde
+import matplotlib.pyplot as plt
+from deepxde.backend import tf
+
+# Constant variables
+gamma = 20.0 # kN/m^3
+q = 100.0 # kN/m^2
+p = 10.0 # kN/m^2
+su=dde.Variable(20.0) # kPa.
+pi = 3.1415926
+
+# Variables for the geometry
+B = 10.0 # m
+
+# Stress normalization
+snorm = pi*gamma*B
+
+# Function for retrieving measurements
+def Measurements(N_o):
+    # Read Plaxis values from files
+    x=np.loadtxt(r"C:\Users\Akval\OneDrive\Skrivebord\Masteroppgave\Method of characteristics\Programmering\Latest code\Inverse\Inverse undrained\x_coord1.txt")
+    y=np.loadtxt(r"C:\Users\Akval\OneDrive\Skrivebord\Masteroppgave\Method of characteristics\Programmering\Latest code\Inverse\Inverse undrained\y_coord1.txt")
+
+    r=np.loadtxt(r"C:\Users\Akval\OneDrive\Skrivebord\Masteroppgave\Method of characteristics\Programmering\Latest code\Inverse\Inverse undrained\r_coord1.txt")
+    theta=np.loadtxt(r"C:\Users\Akval\OneDrive\Skrivebord\Masteroppgave\Method of characteristics\Programmering\Latest code\Inverse\Inverse undrained\theta_coord1.txt")
+
+    sig_x=np.loadtxt(r"C:\Users\Akval\OneDrive\Skrivebord\Masteroppgave\Method of characteristics\Programmering\Latest code\Inverse\Inverse undrained\sig_x1.txt")
+    sig_y=np.loadtxt(r"C:\Users\Akval\OneDrive\Skrivebord\Masteroppgave\Method of characteristics\Programmering\Latest code\Inverse\Inverse undrained\sig_y1.txt")
+    tau_xy=np.loadtxt(r"C:\Users\Akval\OneDrive\Skrivebord\Masteroppgave\Method of characteristics\Programmering\Latest code\Inverse\Inverse undrained\tau_xy1.txt")
+    # Change sign on theta    
+    theta=-1*theta
+
+    # Lists for reduced obervations - values outside of the Prandtl and Rankine zones are removed
+    x_r=[]
+    y_r=[]
+    r_r=[]
+    theta_r=[]
+    sig_xr=[]
+    sig_yr=[]
+    tau_xyr=[]
+
+    # Remove observations outside of the Rakine and Prandlt failure zones
+    for i in range(np.size(x,0)):
+        for j in range(np.size(x,1)):
+            x_r.append(x[i,j])
+            y_r.append(y[i,j])
+            r_r.append(r[i,j])
+            theta_r.append(theta[i,j])
+            sig_xr.append(sig_x[i,j])
+            sig_yr.append(sig_y[i,j])
+            tau_xyr.append(tau_xy[i,j])
+
+    # Convert to arrays
+    # Lists for reduced obervations
+    x_r=np.array(x_r)
+    y_r=np.array(y_r)
+    r_r=np.array(r_r)
+    theta_r=np.array(theta_r)
+    sig_xr=np.array(sig_xr)
+    sig_yr=np.array(sig_yr)
+    tau_xyr=np.array(tau_xyr)
+    
+    tau_xyr_red = []
+    
+    for i in range(len(tau_xyr)):
+        if tau_xyr[i] >= 0.000000000:
+            tau_xyr_red.append(-1 * tau_xyr[i])
+        else:
+            tau_xyr_red.append(tau_xyr[i])
+    tau_xyr_red = np.array(tau_xyr_red)        
+    
+    # Sample N_o measurements randomly
+    id_list=np.random.choice(np.linspace(0,np.size(x_r)-1,num=np.size(x_r),dtype=int),N_o,replace=False)
+    
+    # Prepare for output
+    r_o=r_r[id_list]
+    theta_o=theta_r[id_list]
+    x_o=x_r[id_list]
+    y_o=y_r[id_list]
+    
+    # Stresses are positive
+    sig_xo=-1*sig_xr[id_list]
+    sig_yo=-1*sig_yr[id_list]
+    tau_xyo=tau_xyr_red[id_list]
+    
+    return r_o, theta_o, x_o, y_o, sig_xo, sig_yo, tau_xyo
+
+# Defining system of PDE
+def PDE(x,y):
+    
+    sig_x, sig_y, tau_xy = y[:, 0:1] , y[:, 1:2] , y[:, 2:3]
+    
+    r, t = x[:,0:1] , x[:,1:2]
+    
+    # Convert to theta
+    t=t*pi
+    
+    # Undrained constraint
+    constr=1/4*(sig_x-sig_y)**2+tau_xy**2-(su/snorm)**2  
+    
+    # Diff equations
+    dSigma_x_dr = dde.grad.jacobian(y, x, i = 0, j = 0)
+    dSigma_x_dt = dde.grad.jacobian(y, x, i = 0, j = 1)
+    
+    dSigma_y_dr = dde.grad.jacobian(y, x, i = 1, j = 0)
+    dSigma_y_dt = dde.grad.jacobian(y, x, i = 1, j = 1)
+    
+    dTau_xy_dr = dde.grad.jacobian(y, x, i = 2, j = 0)
+    dTau_xy_dt = dde.grad.jacobian(y, x, i = 2, j = 1)
+    
+    # Evaluate PDEs
+    diff_1 = r*pi*tf.cos(t)*dSigma_x_dr - tf.sin(t)*dSigma_x_dt + r*pi*dTau_xy_dr*tf.sin(t)+tf.cos(t)*dTau_xy_dt
+    diff_2 = r*pi*tf.cos(t)*dTau_xy_dr - tf.sin(t)*dTau_xy_dt + r*pi*tf.sin(t)*dSigma_y_dr + tf.cos(t)*dSigma_y_dt - r*pi*gamma*B/snorm
+    
+    return [diff_1, diff_2, constr] 
+
+# Defining geomtery
+r0=0.0001
+geom = dde.geometry.Rectangle([r0, 0], [1, 1])
+
+# Defining boundary conditions
+# Left boundary = Dirichlet BC
+def lower_boundary (x, on_boundary):
+    return on_boundary and np.isclose(x[1], 0)
+
+BC_lower_0 = dde.icbc.DirichletBC(geom, lambda X: (q-2*su)/snorm, lower_boundary, component=0)
+BC_lower_1 = dde.icbc.DirichletBC(geom, lambda X: q/snorm, lower_boundary, component=1)
+BC_lower_2 = dde.icbc.DirichletBC(geom, lambda X: 0, lower_boundary, component=2)
+
+
+# Right boundary = Dirichlet BC
+def up_boundary(x, on_boundary):
+    return on_boundary and np.isclose(x[1], 1)
+
+BC_up_0 = dde.icbc.DirichletBC(geom, lambda X: (p+2*su)/snorm, up_boundary,component=0) 
+BC_up_1 = dde.icbc.DirichletBC(geom, lambda X: p/snorm, up_boundary,component=1)
+BC_up_2 = dde.icbc.DirichletBC(geom, lambda X: 0, up_boundary,component=2)
+
+
+# Number of observations
+N_o=400
+# Get observations
+r_o, theta_o, x_o, y_o, sig_xo, sig_yo, tau_xyo = Measurements(N_o)
+# Normalizing observations
+r_o, theta_o, x_o, y_o, sig_xo, sig_yo, tau_xyo = r_o/B, theta_o/pi, x_o/snorm, y_o/snorm, sig_xo/snorm, sig_yo/snorm, tau_xyo/snorm
+
+
+sig_xo=np.reshape(sig_xo,(N_o, 1))
+sig_yo=np.reshape(sig_yo,(N_o, 1))
+tau_xyo=np.reshape(tau_xyo,(N_o, 1))
+
+# Merge coordinate vectors in an array
+x_o=np.vstack((r_o,theta_o)).T
+
+# Observations as point set boundary conditions
+observe_sig_x = dde.icbc.PointSetBC(x_o, sig_xo, component=0)
+
+observe_sig_y = dde.icbc.PointSetBC(x_o, sig_yo, component=1)
+
+observe_tau_xy = dde.icbc.PointSetBC(x_o, tau_xyo, component=2)
+
+# Gathering BCs
+BC = [BC_lower_0, BC_lower_1, BC_lower_2, BC_up_0, BC_up_1, BC_up_2, observe_sig_x, observe_sig_y, observe_tau_xy]
+
+# Creating, defining and implementing neural network
+data = dde.data.PDE(
+    geom,
+    PDE,
+    BC, 
+    num_domain = 500,
+    num_boundary = 200,
+    anchors=x_o,
+    num_test = 500,
+    train_distribution = 'LHS'
+    )
+
+# Spesifics of the neural network
+activation = 'tanh'
+layer_size = [2] + [20, 20, 20] * 10 + [3]
+initializer = 'Glorot uniform'
+
+# Neural network
+net = dde.nn.PFNN(layer_size, activation, initializer)
+
+
+# Spesifics of the model
+optimizer = 'adam'
+learning_rate = 0.001
+lw=[1,1,1,1,1,1,1,1,1,1,1,14]
+model = dde.Model(data, net)
+model.compile(optimizer, learning_rate,  external_trainable_variables=[su])
+variable = dde.callbacks.VariableValue(su, period=1000)
+PDE_resampler = dde.callbacks.PDEPointResampler(period = 100)
+model.train(20000, callbacks=[variable,PDE_resampler])
+
+# Compiling second model using L-BFGS optimizer
+dde.optimizers.config.set_LBFGS_options(ftol=0, gtol=1e-10)
+model.compile('L-BFGS',external_trainable_variables=[su])
+
+# Training and saving/plotting the model
+losshistory, train_state = model.train(callbacks=[variable,PDE_resampler])
+dde.saveplot(losshistory, train_state, issave = False, isplot = True)
+
+
+# Plot values
+x = geom.uniform_points(10000, boundary=True)
+
+y_pred = model.predict(x)
+
+plt.scatter(x[:,0],x[:,1],c=y_pred[:,0]); plt.colorbar()
+plt.scatter(x_o[:,0],x_o[:,1],c=sig_xo)
+plt.xlabel('$ r/B $')
+plt.ylabel('$ \\theta/\pi $')
+plt.title('$ \sigma_{x, norm} $ [-]')
+plt.show()
+
+plt.scatter(x[:,0],x[:,1],c=y_pred[:,1]); plt.colorbar()
+plt.scatter(x_o[:,0],x_o[:,1],c=sig_yo)
+plt.xlabel('$ r/B $')
+plt.ylabel('$ \\theta/\pi $')
+plt.title('$ \sigma_{y, norm} $ [-]')
+plt.show()
+
+plt.scatter(x[:,0],x[:,1],c=abs(y_pred[:,2])); plt.colorbar()
+plt.scatter(x_o[:,0],x_o[:,1],c=abs(tau_xyo))
+plt.xlabel('$ r/B $')
+plt.ylabel('$ \\theta/\pi $')
+plt.title('$ \\tau_{xy, norm} $ [-]')
+plt.show()
+
+# Calculate the value of su from data
+su_pred=np.sqrt(1/4*(y_pred[:,0]-y_pred[:,1])**2 + y_pred[:,2]**2)*snorm
+plt.scatter(x[:,0],x[:,1],c=su_pred); plt.colorbar()
+plt.xlabel('$ r/B $')
+plt.ylabel('$ \\theta/\pi $')
+plt.title('$ s_{u} $ [kPa]')
+# plt.savefig(r'C:\Users\Akval\OneDrive\Skrivebord\Masteroppgave\Method of characteristics\Programmering\Latest code\Forward\Lagrede bilder/su-polar.png', dpi=600)
+plt.show()
+
+# Convert to non-normalized cartesian coordinates
+x1=x[:,0]*B*np.cos(x[:,1]*pi)
+y1=x[:,0]*B*np.sin(x[:,1]*pi)
+x2=x_o[:,0]*B*np.cos(x_o[:,1]*pi)
+y2=x_o[:,0]*B*np.sin(x_o[:,1]*pi)
+
+
+# Convert to non-normalized stresses
+y_pred1=y_pred*snorm
+
+# Plot sigma_x
+plt.scatter(x1,y1,c=y_pred1[:,0])
+plt.scatter(x2,y2,c=sig_xo*snorm)
+ax=plt.gca()
+ax.invert_yaxis()
+plt.colorbar()
+plt.xlabel('$ x $')
+plt.ylabel('$ y $')
+plt.title('$ \sigma_x $ [kPa]')
+# plt.savefig(r'C:\Users\Akval\OneDrive\Skrivebord\Masteroppgave\Method of characteristics\Programmering\Latest code\Forward\Lagrede bilder/sigmax-cartesian.png', dpi=600)
+plt.show()
+
+# Plot sigma_y
+plt.scatter(x1,y1,c=y_pred1[:,1])
+plt.scatter(x2,y2,c=sig_yo*snorm)
+ax=plt.gca()
+ax.invert_yaxis()
+plt.colorbar()
+plt.xlabel('$ x $')
+plt.ylabel('$ y $')
+plt.title('$ \sigma_y $ [kPa]')
+# plt.savefig(r'C:\Users\Akval\OneDrive\Skrivebord\Masteroppgave\Method of characteristics\Programmering\Latest code\Forward\Lagrede bilder/sigmay-cartesian.png', dpi=600)
+plt.show()
+
+# # Plot tau_xy
+plt.scatter(x1,y1,c=abs(y_pred1[:,2]))
+plt.scatter(x2,y2,c=abs(tau_xyo*snorm))
+ax=plt.gca()
+ax.invert_yaxis()
+plt.colorbar()
+plt.xlabel('$ x $')
+plt.ylabel('$ y $')
+plt.title('$ \\tau_{xy} $ [kPa]')
+# plt.savefig(r'C:\Users\Akval\OneDrive\Skrivebord\Masteroppgave\Method of characteristics\Programmering\Latest code\Forward\Lagrede bilder/tauxy-cartesian.png', dpi=600)
+plt.show()
+
+
+# Calculate the value of su from data
+plt.scatter(x1,y1,c=su_pred)
+ax=plt.gca()
+ax.invert_yaxis()
+plt.colorbar()
+plt.xlabel('$ x $')
+plt.ylabel('$ y $')
+plt.title('$ s_u $ [kPa]')
+# plt.savefig(r'C:\Users\Akval\OneDrive\Skrivebord\Masteroppgave\Method of characteristics\Programmering\Latest code\Forward\Lagrede bilder/su-cartesian.png', dpi=600)
+plt.show()
+
+print("Mean su value=%.3f kPa" % (np.mean(su_pred)))
+print("Max sig_x value=%.3f kPa" % (np.max(y_pred1[:,0])))
+print("Max sig_y value=%.3f kPa" % (np.max(y_pred1[:,1])))
+print("max tau_xy value=%.3f kPa" % (np.max(y_pred1[:,2])))
+print("Min tau_xy value=%.3f kPa" % (np.min(y_pred1[:,2])))
